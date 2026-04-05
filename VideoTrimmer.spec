@@ -31,6 +31,12 @@ for exe in (ffmpeg_exe, ffprobe_exe):
 # ── tkinterdnd2 data files ────────────────────────────────────────────────────
 datas = collect_data_files("tkinterdnd2")
 
+# ── Pillow data files (for bundled build) ────────────────────────────────────
+try:
+    datas += collect_data_files("PIL")
+except Exception:
+    pass
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 a = Analysis(
@@ -38,7 +44,7 @@ a = Analysis(
     pathex=[spec_dir],
     binaries=binaries,
     datas=datas,
-    hiddenimports=["tkinterdnd2"],
+    hiddenimports=["tkinterdnd2", "PIL", "PIL.Image", "PIL.ImageTk"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

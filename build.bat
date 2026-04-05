@@ -37,7 +37,7 @@ echo ffprobe.exe OK
 
 echo.
 echo [1/3] Installing dependencies...
-python -m pip install pyinstaller tkinterdnd2 --quiet --upgrade
+python -m pip install pyinstaller tkinterdnd2 pillow --quiet --upgrade
 if errorlevel 1 (
     echo ERROR: pip install failed
     pause
