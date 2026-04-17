@@ -144,6 +144,59 @@ def ffmpeg_cut(src: str, dst: str, start: float, end: float,
     t.start()
 
 
+def ffmpeg_cut_compress(src: str, dst: str, start: float, end: float,
+                        crf: int = 23, preset: str = "medium",
+                        scale: str = "original",
+                        progress_cb=None, done_cb=None):
+    """
+    Run FFmpeg with H.264 re-encoding (trim + compress) in a background thread.
+    crf: 0–51, lower = better quality (18–28 is practical range).
+    preset: ultrafast / fast / medium / slow / veryslow.
+    scale: "original" or e.g. "1280x720".
+    """
+    duration = end - start
+    vf_filters = []
+    if scale != "original":
+        vf_filters.append(f"scale={scale}")
+
+    cmd = [
+        FFMPEG, "-y",
+        "-ss", str(start),
+        "-i", src,
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", preset,
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+    ]
+    if vf_filters:
+        cmd += ["-vf", ",".join(vf_filters)]
+    cmd.append(dst)
+
+    def run():
+        proc = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        time_re = re.compile(r"time=(\d+:\d+:\d+\.\d+)")
+        for line in proc.stderr:
+            if progress_cb:
+                m = time_re.search(line)
+                if m:
+                    elapsed = hms_to_seconds(m.group(1))
+                    pct = min(1.0, elapsed / duration) if duration > 0 else 0
+                    progress_cb(pct)
+        proc.wait()
+        if done_cb:
+            done_cb(proc.returncode)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+
 def ffmpeg_extract_frame(src: str, t: float, width: int = 240) -> str | None:
     """
     Extract a single frame at time t from src into a temp JPEG file.
@@ -588,7 +641,7 @@ class VideoTrimmerApp:
         self.root = root
         self.root.title("✂  Video Trimmer")
         self.root.configure(bg=BG)
-        self.root.geometry("900x560")
+        self.root.geometry("900x620")
         self.root.resizable(True, False)
 
         self.src_path   = None
@@ -608,7 +661,7 @@ class VideoTrimmerApp:
         hdr.pack(fill="x", padx=20, pady=(10, 4))
         tk.Label(hdr, text="✂  VIDEO TRIMMER", bg=BG, fg=ACCENT,
                  font=("Courier New", 14, "bold")).pack(side="left")
-        tk.Label(hdr, text="stream copy · no re-encoding", bg=BG,
+        tk.Label(hdr, text="stream copy · no re-encoding  or  H.264 compress", bg=BG,
                  fg=TEXT_DIM, font=FONT_TINY).pack(side="left", padx=10)
 
         # ════════════════════════════════════════════════════
@@ -736,6 +789,78 @@ class VideoTrimmerApp:
         self._mk_btn(out_row, "…", self._browse_out, fg=TEXT_DIM,
                      padx=6).pack(side="left", padx=(4, 0))
 
+        # ── Compression panel ─────────────────────────────────
+        tk.Frame(right, bg=MUTED, height=1).pack(fill="x", pady=(4, 2))
+
+        comp_hdr = tk.Frame(right, bg=BG)
+        comp_hdr.pack(fill="x")
+        self.compress_var = tk.BooleanVar(value=False)
+        comp_check = tk.Checkbutton(
+            comp_hdr, text="🗜  COMPRESS  (re-encode with H.264)",
+            variable=self.compress_var,
+            bg=BG, fg=ACCENT2, activebackground=BG, activeforeground=ACCENT,
+            selectcolor=MUTED, font=("Helvetica", 10, "bold"),
+            relief="flat", cursor="hand2",
+            command=self._toggle_compress_panel
+        )
+        comp_check.pack(side="left")
+
+        self.compress_panel = tk.Frame(right, bg=PANEL,
+                                       highlightthickness=1,
+                                       highlightbackground=MUTED)
+        # — row 1: CRF slider ——
+        crf_row = tk.Frame(self.compress_panel, bg=PANEL)
+        crf_row.pack(fill="x", padx=10, pady=(6, 2))
+        tk.Label(crf_row, text="Quality (CRF):", bg=PANEL, fg=TEXT_DIM,
+                 font=FONT_TINY).pack(side="left")
+        self.crf_var = tk.IntVar(value=23)
+        self.crf_label = tk.Label(crf_row, text="23  (good)", bg=PANEL,
+                                  fg=ACCENT, font=FONT_MONO, width=14)
+        self.crf_label.pack(side="right")
+        crf_scale = tk.Scale(
+            crf_row, from_=0, to=51, orient="horizontal",
+            variable=self.crf_var, command=self._update_crf_label,
+            bg=PANEL, fg=TEXT, troughcolor=MUTED, highlightthickness=0,
+            activebackground=ACCENT2, sliderrelief="flat",
+            showvalue=False, length=160
+        )
+        crf_scale.pack(side="left", padx=6)
+
+        # — row 2: preset + resolution ——
+        pr_row = tk.Frame(self.compress_panel, bg=PANEL)
+        pr_row.pack(fill="x", padx=10, pady=(0, 6))
+
+        tk.Label(pr_row, text="Preset:", bg=PANEL, fg=TEXT_DIM,
+                 font=FONT_TINY).pack(side="left")
+        self.preset_var = tk.StringVar(value="medium")
+        preset_menu = tk.OptionMenu(pr_row, self.preset_var,
+                                    "ultrafast", "fast", "medium", "slow", "veryslow")
+        preset_menu.config(bg=MUTED, fg=TEXT, activebackground=ACCENT2,
+                           relief="flat", font=FONT_TINY,
+                           highlightthickness=0, width=9)
+        preset_menu["menu"].config(bg=MUTED, fg=TEXT, activebackground=ACCENT2)
+        preset_menu.pack(side="left", padx=(4, 18))
+
+        tk.Label(pr_row, text="Resolution:", bg=PANEL, fg=TEXT_DIM,
+                 font=FONT_TINY).pack(side="left")
+        self.scale_var = tk.StringVar(value="original")
+        scale_menu = tk.OptionMenu(pr_row, self.scale_var,
+                                   "original", "1920x1080", "1280x720",
+                                   "854x480", "640x360")
+        scale_menu.config(bg=MUTED, fg=TEXT, activebackground=ACCENT2,
+                          relief="flat", font=FONT_TINY,
+                          highlightthickness=0, width=10)
+        scale_menu["menu"].config(bg=MUTED, fg=TEXT, activebackground=ACCENT2)
+        scale_menu.pack(side="left", padx=4)
+
+        # hint
+        tk.Label(self.compress_panel,
+                 text="Lower CRF = better quality, larger file   |   "
+                      "Slower preset = smaller file, longer encode",
+                 bg=PANEL, fg=TEXT_DIM, font=FONT_TINY).pack(pady=(0, 4))
+
+        # Don't pack compress_panel yet — shown only when checkbox is on
+
         # Progress bar
         prog_frame = tk.Frame(right, bg=BG)
         prog_frame.pack(fill="x", pady=2)
@@ -757,6 +882,32 @@ class VideoTrimmerApp:
         )
         cut_btn.pack(pady=6)
         self.cut_btn = cut_btn
+
+    # ── compression helpers ───────────────────────────────
+    def _toggle_compress_panel(self):
+        if self.compress_var.get():
+            self.compress_panel.pack(fill="x", pady=(0, 4))
+            # ensure output is .mp4 when compress is on
+            out = self.out_var.get()
+            if out and not out.lower().endswith(".mp4"):
+                base = os.path.splitext(out)[0]
+                self.out_var.set(base + ".mp4")
+        else:
+            self.compress_panel.pack_forget()
+
+    def _update_crf_label(self, val=None):
+        v = self.crf_var.get()
+        if v <= 17:
+            quality = "visually lossless"
+        elif v <= 23:
+            quality = "good"
+        elif v <= 28:
+            quality = "acceptable"
+        elif v <= 35:
+            quality = "low"
+        else:
+            quality = "very low"
+        self.crf_label.config(text=f"{v}  ({quality})")
 
     # ── preview panel (left column) ───────────────────────
     def _update_preview_panel(self, t: float, marker: str):
@@ -933,8 +1084,14 @@ class VideoTrimmerApp:
             messagebox.showerror("Invalid range", "IN must be before OUT.")
             return
 
-        self.cut_btn.config(state="disabled", text="Cutting…")
-        self.status_var.set("⏳  Running FFmpeg (stream copy)…")
+        use_compress = self.compress_var.get()
+
+        if use_compress:
+            self.cut_btn.config(state="disabled", text="Compressing…")
+            self.status_var.set("⏳  Running FFmpeg (H.264 re-encode)…")
+        else:
+            self.cut_btn.config(state="disabled", text="Cutting…")
+            self.status_var.set("⏳  Running FFmpeg (stream copy)…")
 
         def on_progress(pct):
             self.root.after(0, self._set_progress, pct)
@@ -945,8 +1102,7 @@ class VideoTrimmerApp:
                 if code == 0:
                     self._set_progress(1.0)
                     self.status_var.set(f"✔  Saved → {out}")
-                    messagebox.showinfo("Done",
-                                        f"Clip saved:\n{out}")
+                    messagebox.showinfo("Done", f"Clip saved:\n{out}")
                 else:
                     self._set_progress(0)
                     self.status_var.set("✘  FFmpeg error — check paths")
@@ -955,7 +1111,17 @@ class VideoTrimmerApp:
                                          "Make sure ffmpeg is installed.")
             self.root.after(0, _finish)
 
-        ffmpeg_cut(self.src_path, out, t_in, t_out, on_progress, on_done)
+        if use_compress:
+            ffmpeg_cut_compress(
+                self.src_path, out, t_in, t_out,
+                crf=self.crf_var.get(),
+                preset=self.preset_var.get(),
+                scale=self.scale_var.get(),
+                progress_cb=on_progress,
+                done_cb=on_done
+            )
+        else:
+            ffmpeg_cut(self.src_path, out, t_in, t_out, on_progress, on_done)
 
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
